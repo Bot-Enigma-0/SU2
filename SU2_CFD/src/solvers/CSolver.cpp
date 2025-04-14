@@ -1697,9 +1697,21 @@ void CSolver::CompleteComms(CGeometry *geometry,
 }
 
 void CSolver::ResetCFLAdapt() {
-  NonLinRes_Series.clear();
-  Old_Func = 0;
-  New_Func = 0;
+  // Clear residual delta histories for all residual families
+  Func_Flow_Series.clear();
+  Func_Turb_Series.clear();
+  Func_Species_Series.clear();
+
+  // Reset previous and current function values
+  Old_Func_Flow = 0.0;
+  Old_Func_Turb = 0.0;
+  Old_Func_Species = 0.0;
+
+  New_Func_Flow = 0.0;
+  New_Func_Turb = 0.0;
+  New_Func_Species = 0.0;
+
+  // Reset buffer counter
   NonLinRes_Counter = 0;
 }
 
@@ -1773,58 +1785,78 @@ void CSolver::AdaptCFLNumber(CGeometry **geometry,
     canIncrease = (linRes < linTol) && (iter >= startingIter);
 
     if ((iMesh == MESH_0) && (Res_Count > 0)) {
-      Old_Func = New_Func;
-      if (NonLinRes_Series.empty()) NonLinRes_Series.resize(Res_Count,0.0);
 
-      /* Sum the RMS residuals for all equations. */
+      /* Buffers for each Residual Family to store history */
+      static std::vector<su2double> Func_Flow_Series(Res_Count, 0.0);
+      static std::vector<su2double> Func_Turb_Series(Res_Count, 0.0);
+      static std::vector<su2double> Func_Species_Series(Res_Count, 0.0);
 
-      New_Func = 0.0;
+      static su2double Old_Func_Flow = 0.0, Old_Func_Turb = 0.0, Old_Func_Species = 0.0;
+      su2double New_Func_Flow = 0.0, New_Func_Turb = 0.0, New_Func_Species = 0.0;
+
+      /* Sum the RMS residuals for each family of equations. */
       for (unsigned short iVar = 0; iVar < solverFlow->GetnVar(); iVar++) {
-        New_Func += log10(solverFlow->GetRes_RMS(iVar));
+        New_Func_Flow += log10(solverFlow->GetRes_RMS(iVar));
       }
-      if ((iMesh == MESH_0) && solverTurb) {
+      if (solverTurb) {
         for (unsigned short iVar = 0; iVar < solverTurb->GetnVar(); iVar++) {
-          New_Func += log10(solverTurb->GetRes_RMS(iVar));
+          New_Func_Turb += log10(solverTurb->GetRes_RMS(iVar));
         }
       }
-      if ((iMesh == MESH_0) && solverSpecies) {
+      if (solverSpecies) {
         for (unsigned short iVar = 0; iVar < solverSpecies->GetnVar(); iVar++) {
-          New_Func += log10(solverSpecies->GetRes_RMS(iVar));
+          New_Func_Species += log10(solverSpecies->GetRes_RMS(iVar));
         }
       }
 
       /* Compute the difference in the nonlinear residuals between the
        current and previous iterations, taking care with very low initial
        residuals (due to initialization). */
+      if ((config->GetInnerIter() == 1) && ((New_Func_Flow - Old_Func_Flow) > 10)) Old_Func_Flow = New_Func_Flow;
+      if ((config->GetInnerIter() == 1) && ((New_Func_Turb - Old_Func_Turb) > 10)) Old_Func_Turb = New_Func_Turb;
+      if ((config->GetInnerIter() == 1) && ((New_Func_Species - Old_Func_Species) > 10)) Old_Func_Species = New_Func_Species;
 
-      if ((config->GetInnerIter() == 1) && (New_Func - Old_Func > 10)) {
-        Old_Func = New_Func;
-      }
-      NonLinRes_Series[NonLinRes_Counter] = New_Func - Old_Func;
+      Func_Flow_Series[NonLinRes_Counter] = New_Func_Flow - Old_Func_Flow;
+      Func_Turb_Series[NonLinRes_Counter] = New_Func_Turb - Old_Func_Turb;
+      Func_Species_Series[NonLinRes_Counter] = New_Func_Species - Old_Func_Species;
+
+      Old_Func_Flow = New_Func_Flow;
+      Old_Func_Turb = New_Func_Turb;
+      Old_Func_Species = New_Func_Species;
 
       /* Increment the counter, if we hit the max size, then start over. */
-
       NonLinRes_Counter++;
       if (NonLinRes_Counter == Res_Count) NonLinRes_Counter = 0;
 
       /* Detect flip-flop convergence to reduce CFL and large increases
        to reset to minimum value, in that case clear the history. */
-
       if (config->GetInnerIter() >= Res_Count) {
-        unsigned long signChanges = 0;
-        su2double totalChange = 0.0;
-        auto prev = NonLinRes_Series.front();
-        for (const auto& val : NonLinRes_Series) {
-          totalChange += val;
-          signChanges += (prev > 0) ^ (val > 0);
-          prev = val;
-        }
-        reduceCFL |= (signChanges > Res_Count/4) && (totalChange > -0.5);
+        auto check_flipflop = [&](const std::vector<su2double>& series) {
+          su2double totalChange = 0.0;
+          unsigned long signChanges = 0;
+          auto prev = series[0];  // Can also use series.front() if preferred
+          for (const auto& val : series) {
+            totalChange += val;
+            signChanges += (prev > 0) ^ (val > 0);
+            prev = val;
+          }
+          bool flipFlop = (signChanges > Res_Count / 4) && (totalChange > -0.5);
+          bool diverging = (totalChange > 2.0);  // orders of magnitude
+          return std::make_pair(flipFlop, diverging);
+        };
 
-        if (totalChange > 2.0) { // orders of magnitude
-          resetCFL = true;
+        auto [flipFlow, divFlow] = check_flipflop(Func_Flow_Series);
+        auto [flipTurb, divTurb] = check_flipflop(Func_Turb_Series);
+        auto [flipSpecies, divSpecies] = check_flipflop(Func_Species_Series);
+
+        reduceCFL |= flipFlow || flipTurb || flipSpecies;
+        resetCFL  |= divFlow || divTurb || divSpecies;
+
+        if (resetCFL) {
           NonLinRes_Counter = 0;
-          for (auto& val : NonLinRes_Series) val = 0.0;
+          std::fill(Func_Flow_Series.begin(), Func_Flow_Series.end(), 0.0);
+          std::fill(Func_Turb_Series.begin(), Func_Turb_Series.end(), 0.0);
+          std::fill(Func_Species_Series.begin(), Func_Species_Series.end(), 0.0);
         }
       }
     }
