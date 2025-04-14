@@ -77,6 +77,17 @@ protected:
   vector<su2double> NonLinRes_Series; /*!< \brief Vector holding the nonlinear residual indicator series. */
   su2double Old_Func,  /*!< \brief Old value of the nonlinear residual indicator. */
   New_Func;            /*!< \brief Current value of the nonlinear residual indicator. */
+  
+  /*--- Split nonlinear residual tracking for adaptive CFL (flow, turbulence, species) ---*/
+
+  vector<su2double> Func_Flow_Series;     /*!< \brief Flow residual evolution. */
+  vector<su2double> Func_Turb_Series;     /*!< \brief Turbulence residual evolution. */
+  vector<su2double> Func_Species_Series;  /*!< \brief Species residual evolution. */
+
+  su2double Old_Func_Flow, New_Func_Flow;           /*!< \brief Flow residual delta tracking. */
+  su2double Old_Func_Turb, New_Func_Turb;           /*!< \brief Turbulence residual delta tracking. */
+  su2double Old_Func_Species, New_Func_Species;     /*!< \brief Species residual delta tracking. */
+  
   unsigned short nVar,           /*!< \brief Number of variables of the problem. */
   nPrimVar,                      /*!< \brief Number of primitive variables of the problem. */
   nPrimVarGrad,                  /*!< \brief Number of primitive variables of the problem in the gradient computation. */
