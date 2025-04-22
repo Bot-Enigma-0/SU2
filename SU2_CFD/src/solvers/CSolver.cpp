@@ -1730,6 +1730,8 @@ void CSolver::AdaptCFLNumber(CGeometry **geometry,
   const su2double CFLMax            = config->GetCFL_AdaptParam(3);
   const su2double acceptableLinTol  = config->GetCFL_AdaptParam(4);
   const su2double startingIter      = config->GetCFL_AdaptParam(5);
+  const su2double lowUnderRelax     = config->GetCFL_AdaptParam(6);
+  const su2double upUnderRelax      = config->GetCFL_AdaptParam(7);
   const bool fullComms              = (config->GetComm_Level() == COMM_FULL);
 
   /* Number of iterations considered to check for stagnation. */
@@ -1768,21 +1770,67 @@ void CSolver::AdaptCFLNumber(CGeometry **geometry,
     /* Tolerance limited to an acceptable value. */
     const su2double linTol = max(acceptableLinTol, config->GetLinear_Solver_Error());
 
+    unsigned long iter = config->GetMultizone_Problem() ? config->GetOuterIter() : config->GetInnerIter();
+    
+    /* --- Compute Global Increase, Decrease and Reset Criteria using the 
+      average under-relaxation on the fine grid --- */
+
+    su2double sum_underRelaxation = 0.0;
+    unsigned long localNodeCount = geometry[iMesh]->GetnPointDomain();
+
+    for (unsigned long iPoint = 0; iPoint < localNodeCount; iPoint++) {
+
+      su2double underRelaxationFlow = solverFlow->GetNodes()->GetUnderRelaxation(iPoint);
+      su2double underRelaxationTurb = 1.0;
+
+      if (solverTurb)
+        underRelaxationTurb = solverTurb->GetNodes()->GetUnderRelaxation(iPoint);
+
+      const su2double underRelaxation = min(underRelaxationFlow, underRelaxationTurb);
+      sum_underRelaxation += underRelaxation;
+    }
+    
+    su2double global_sum_underRelaxation = 0.0;
+    SU2_MPI::Allreduce(&sum_underRelaxation, &global_sum_underRelaxation, 1, MPI_DOUBLE, MPI_SUM, SU2_MPI::GetComm());
+
+    unsigned long localNodeCountU = static_cast<unsigned long>(localNodeCount);
+    unsigned long globalNodeCount = 0;
+    SU2_MPI::Allreduce(&localNodeCountU, &globalNodeCount, 1, MPI_UNSIGNED_LONG, MPI_SUM, SU2_MPI::GetComm());
+
+    su2double Avg_UR = global_sum_underRelaxation / static_cast<su2double>(globalNodeCount);
+
+    /* Set CFL strategy flags based on under-relaxation average. */
+    resetCFL    = (Avg_UR < lowUnderRelax) && (iter >= startingIter);
+    reduceCFL   = (Avg_UR >= lowUnderRelax && Avg_UR <= upUnderRelax) && (iter >= startingIter);
+    canIncrease = (Avg_UR > upUnderRelax && linRes<linTol) && (iter >= startingIter);
+
+    /* REMOVE LATER: for now create a buffer file to store information - replace with screen/history outputs */
+    std::ofstream URF_log_file;
+    if (rank == MASTER_NODE) {
+      URF_log_file.open("under_relaxation_buffer.dat", std::ios::app);  
+      if (!URF_log_file.is_open()) {
+        std::cerr << "Unable to open under_relaxation_buffer.dat" << std::endl;
+      }
+    }
+
+    if (iMesh == MESH_0 && rank == MASTER_NODE && URF_log_file.is_open()) {
+      URF_log_file << "Iteration: " << iter << std::endl; 
+      URF_log_file << "Global Sum UnderRelaxation: " << global_sum_underRelaxation << std::endl;
+      URF_log_file << "Global Avg UnderRelaxation: " << Avg_UR << std::endl;
+      URF_log_file << "resetCFL: " << resetCFL << " reduceCFL: " << reduceCFL << " canIncrease: " << canIncrease << std::endl;
+      URF_log_file << std::endl;
+    }
+    
+    if (rank == MASTER_NODE && URF_log_file.is_open()) {
+      URF_log_file.close();
+    }
+
     /* Check that we are meeting our nonlinear residual reduction target
      over time so that we do not get stuck in limit cycles, this is done
      on the fine grid and applied to all others. */
 
     BEGIN_SU2_OMP_SAFE_GLOBAL_ACCESS
     { /* Only the master thread updates the shared variables. */
-
-    /* Check if we should decrease or if we can increase, the 20% is to avoid flip-flopping. */
-    resetCFL = linRes > 0.99;
-    unsigned long iter = config->GetMultizone_Problem() ? config->GetOuterIter() : config->GetInnerIter();
-
-    /* only change CFL number when larger than starting iteration */
-    reduceCFL = (linRes > 1.2*linTol) && (iter >= startingIter);
-
-    canIncrease = (linRes < linTol) && (iter >= startingIter);
 
     if ((iMesh == MESH_0) && (Res_Count > 0)) {
 
@@ -1834,7 +1882,7 @@ void CSolver::AdaptCFLNumber(CGeometry **geometry,
         auto check_flipflop = [&](const std::vector<su2double>& series) {
           su2double totalChange = 0.0;
           unsigned long signChanges = 0;
-          auto prev = series[0];  // Can also use series.front() if preferred
+          auto prev = series.front(); 
           for (const auto& val : series) {
             totalChange += val;
             signChanges += (prev > 0) ^ (val > 0);
