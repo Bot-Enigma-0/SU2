@@ -1791,6 +1791,8 @@ void CConfig::SetConfig_Options() {
   default_cfl_adapt[3] = 100.0;
   default_cfl_adapt[4] = 0.001;
   default_cfl_adapt[5] = 0.0;
+  default_cfl_adapt[6] = 0.2;
+  default_cfl_adapt[7] = 0.95;
   addDoubleListOption("CFL_ADAPT_PARAM", nCFL_AdaptParam, CFL_AdaptParam);
   /* DESCRIPTION: Reduction factor of the CFL coefficient in the adjoint problem */
   addDoubleOption("CFL_REDUCTION_ADJFLOW", CFLRedCoeff_AdjFlow, 0.8);
